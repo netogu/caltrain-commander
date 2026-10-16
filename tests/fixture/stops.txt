@@ -1,0 +1,10 @@
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station
+A,"Alpha, North Station",37.8,-122.4,1,
+B,Beta Caltrain Station,37.6,-122.3,1,
+C,Gamma,37.4,-122.2,1,
+A1,Alpha NB,37.8,-122.4,0,A
+A2,Alpha SB,37.8,-122.4,0,A
+B1,Beta NB,37.6,-122.3,0,B
+B2,Beta SB,37.6,-122.3,0,B
+C1,Gamma NB,37.4,-122.2,0,C
+C2,Gamma SB,37.4,-122.2,0,C
