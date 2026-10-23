@@ -34,18 +34,24 @@ the status bar says so. Times are shown in Pacific time.
 
 | Key | Action |
 |---|---|
-| `1` / `2` / `Tab` | Departures board / Trip planner |
+| `1` / `2` / `3` / `Tab` | Next trains (default) / Departures board / Trip planner |
+| `o` `d` `x` | Next trains: pick origin / destination / swap (saved between sessions) |
 | `j` `k` / arrows, `PgUp` `PgDn`, `g` `G` | Move, page, first / last |
 | `h` `l` | Board table: previous / next train (`,` `.` page). List view: switch pane |
 | `v` | Board: toggle schedule table (stations × trains) / departures list |
 | `Enter` | Show every stop of the selected train; `Esc` goes back |
 | `/` | Board: find a station (type to filter, `sj` finds San Jose Diridon) |
 | `n` `s` `a` | Board: northbound / southbound / all |
-| `o` `d` `x` | Planner: pick origin / destination / swap |
+| `o` `d` `x` | Planner: pick origin / destination / swap (not saved) |
 | `[` `]` `t` | Previous day / next day / today (board and planner each keep their own) |
 | `T` `,` `.` | Planner: type a date/time, or shift it by −/+30 minutes (`t` returns to now) |
 | `r` | Re-download the schedule |
 | `?` / `q` | Help / quit |
+
+The Next trains tab shows the next two direct trains from your saved origin to your saved
+destination with a live countdown, train number and scheduled arrival. Choices are stored in
+`$XDG_CONFIG_HOME/caltrain-commander/config` (default `~/.config/caltrain-commander/config`).
+The feed is schedule-only, so delays are not available (the tab shows `Delay: n/a`).
 
 A time like `00:05+1` means the train runs after midnight on that service day.
 
@@ -53,6 +59,7 @@ A time like `00:05+1` means the train runs after midnight on that service day.
 
 - `src/csv.c` — RFC-4180 reader (quoted fields, CRLF, BOM, lookup by header name)
 - `src/gtfs.c` — schedule model, service-day rules (`calendar` + `calendar_dates`), departure and A→B queries
+- `src/config.c` — saved origin/destination for the Next trains tab
 - `src/fetch.c` — cache handling; runs `curl` / `unzip` without a shell
 - `src/ui.c` — ncurses views
 - `tests/` — fixture feed and checks for quoting, service exceptions, and after-midnight trains

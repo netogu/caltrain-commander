@@ -12,7 +12,7 @@ find_package(Curses REQUIRED)
 find_package(Threads REQUIRED)
 
 # Schedule model + loader + fetch: no UI dependencies, so it is testable alone.
-add_library(gtfs STATIC src/csv.c src/gtfs.c src/fetch.c)
+add_library(gtfs STATIC src/csv.c src/gtfs.c src/fetch.c src/config.c)
 target_include_directories(gtfs PUBLIC src)
 
 add_executable(caltrain src/main.c src/ui.c)

@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "config.h"
 #include "util.h"
 
 #include <ctype.h>
@@ -18,7 +19,8 @@
 #define KEY_ESC 27
 #define CTRL(c) ((c) & 0x1f)
 
-enum { M_BOARD, M_PLAN, M_DETAIL };
+enum { M_NEXT, M_BOARD, M_PLAN, M_DETAIL };
+#define NNEXT 2 /* trains shown on the Next tab */
 
 #define COLW 7 /* one train column of the schedule table */
 
@@ -48,6 +50,10 @@ typedef struct {
     int from, to, plan_sel, plan_top, njr;
     int plan_live, pdate, ptime; /* planner "leave after"; live follows the clock */
     Journey *jrs;
+    /* next trains: saved origin/destination */
+    Config cfg;
+    int nfrom, nto, nsel, nnext, ntomorrow; /* ntomorrow: first index that runs tomorrow */
+    Journey nxt[NNEXT];
     /* train detail */
     int dtrip, d_top, hl_a, hl_b;
     int page; /* rows per page of the list last drawn */
@@ -60,6 +66,7 @@ typedef struct {
 } App;
 
 static int at_title, at_sel, at_head, at_good, at_nb, at_sb, at_dim, at_warn, at_bar;
+static int at_stn, at_num, at_typ, at_time; /* station, train number, train type, schedule time */
 
 static void init_attrs(void) {
     if (has_colors()) {
@@ -82,6 +89,10 @@ static void init_attrs(void) {
         at_dim = A_DIM;
         at_warn = COLOR_PAIR(8) | A_BOLD;
         at_bar = COLOR_PAIR(7);
+        at_stn = COLOR_PAIR(5) | A_BOLD;
+        at_num = COLOR_PAIR(3) | A_BOLD;
+        at_typ = COLOR_PAIR(6);
+        at_time = A_BOLD;
     } else {
         at_title = A_REVERSE | A_BOLD;
         at_sel = A_REVERSE;
@@ -91,6 +102,8 @@ static void init_attrs(void) {
         at_dim = A_DIM;
         at_warn = A_BOLD;
         at_bar = A_REVERSE;
+        at_stn = at_num = at_time = A_BOLD;
+        at_typ = A_NORMAL;
     }
 }
 
@@ -197,6 +210,24 @@ static void set_msg(App *a, const char *fmt, ...) {
 
 /* ---- state ------------------------------------------------------------- */
 
+static int find_station_id(const Gtfs *g, const char *id) {
+    for (int i = 0; id[0] && i < g->nstations; i++)
+        if (!strcmp(g->stations[i].id, id)) return i;
+    return -1;
+}
+
+static void resolve_cfg(App *a) {
+    a->nfrom = find_station_id(*a->gp, a->cfg.origin);
+    a->nto = find_station_id(*a->gp, a->cfg.dest);
+}
+
+static void save_cfg(App *a) {
+    const Gtfs *g = *a->gp;
+    snprintf(a->cfg.origin, sizeof a->cfg.origin, "%s", a->nfrom >= 0 ? g->stations[a->nfrom].id : "");
+    snprintf(a->cfg.dest, sizeof a->cfg.dest, "%s", a->nto >= 0 ? g->stations[a->nto].id : "");
+    if (config_save(&a->cfg) != 0) set_msg(a, "Could not save settings");
+}
+
 static void build_vis(App *a) {
     const Gtfs *g = *a->gp;
     free(a->vis);
@@ -254,6 +285,26 @@ static void refresh_lists(App *a) {
         a->ptime = from_time_live();
     }
     a->njr = gtfs_journeys(g, a->from, a->to, a->pdate, a->ptime, a->jrs, MAXLIST);
+
+    /* Next trains: rest of today, topped up from tomorrow after the last one.
+     * gtfs_journeys filters after truncating to `max` departures from the
+     * origin (both directions), so ask for a full list and keep the head. */
+    static Journey all[MAXLIST];
+    a->nnext = a->ntomorrow = 0;
+    if (a->nfrom >= 0 && a->nto >= 0 && a->nfrom != a->nto) {
+        int today = date_today(), n = gtfs_journeys(g, a->nfrom, a->nto, today, time_now(), all, MAXLIST);
+        for (int i = 0; i < n && a->nnext < NNEXT; i++) a->nxt[a->nnext++] = all[i];
+        a->ntomorrow = a->nnext;
+        if (a->nnext < NNEXT) {
+            n = gtfs_journeys(g, a->nfrom, a->nto, date_add(today, 1), 0, all, MAXLIST);
+            for (int i = 0; i < n && a->nnext < NNEXT; i++) {
+                a->nxt[a->nnext] = all[i];
+                a->nxt[a->nnext].dep.time += 86400;
+                a->nxt[a->nnext++].arr_time += 86400;
+            }
+        }
+    }
+    if (a->nsel >= a->nnext) a->nsel = a->nnext > 0 ? a->nnext - 1 : 0;
     if (a->tdirty) build_cols(a);
 }
 
@@ -276,10 +327,10 @@ static void open_detail(App *a, int trip, int hl_a, int hl_b) {
 /* ---- views ------------------------------------------------------------- */
 
 static void draw_title(const App *a, int cols) {
-    static const char *tabs[] = {" 1 Departures ", " 2 Trip Planner "};
+    static const char *tabs[] = {" 1 Next Trains ", " 2 Departures ", " 3 Trip Planner "};
     txt(0, 0, cols, at_title, " Caltrain Commander");
     int x = 21, active = a->mode == M_DETAIL ? a->prev_mode : a->mode;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         int w = (int)strlen(tabs[i]);
         txt(0, x, w, i == active ? at_sel : at_title, "%s", tabs[i]);
         x += w + 1;
@@ -292,6 +343,7 @@ static void draw_title(const App *a, int cols) {
 
 static void draw_status(const App *a, int rows, int cols) {
     static const char *hints[] = {
+        " o origin  d destination  x swap  j/k select  Enter stops  r reload  ? help  q quit",
         " h/l train  j/k station  Enter stops  / find  n/s/a dir  v list  [ ] day  t today  r reload  ? help  q quit",
         " o origin  d dest  x swap  T date/time  [ ] day  , . 30min  t now  Enter stops  r reload  ? help  q quit",
         " j/k scroll  PgUp/PgDn page  Esc back  q quit",
@@ -324,7 +376,7 @@ static void draw_dep_list(App *a, int y0, int h, int cols) {
         int i = a->st_top + r;
         if (i < a->nvis) {
             int at = row_attr(i == a->sel, a->focus == 0);
-            txt(y0 + 1 + r, 1, lw - 2, at, "%c %s", i == a->sel ? '>' : ' ', g->stations[a->vis[i]].name);
+            txt(y0 + 1 + r, 1, lw - 2, i == a->sel && a->focus == 0 ? at : at_stn, "%c %s", i == a->sel ? '>' : ' ', g->stations[a->vis[i]].name);
         } else txt(y0 + 1 + r, 1, lw - 2, A_NORMAL, "");
     }
 
@@ -359,17 +411,18 @@ static void draw_dep_list(App *a, int y0, int h, int cols) {
         fmt_hm(d->time, t1, sizeof t1);
         txt(y, x, iw, at, "");
         int cx = x + 1;
-        txt(y, cx, 8, at, "%s", t1);
+        int hot = sel && a->focus == 1;
+        txt(y, cx, 8, hot ? at : at_time, "%s", t1);
         cx += 9;
-        txt(y, cx, 5, at, "%s", t->number);
+        txt(y, cx, 5, hot ? at : at_num, "%s", t->number);
         cx += 6;
         txt(y, cx, 2, sel && a->focus == 1 ? at : dir_attr(t->direction), "%s", dir_name(t->direction));
         cx += 3;
         if (wide) {
-            txt(y, cx, 12, at, "%.*s", type_len(trip_type(g, t)), trip_type(g, t));
+            txt(y, cx, 12, hot ? at : at_typ, "%.*s", type_len(trip_type(g, t)), trip_type(g, t));
             cx += 13;
         }
-        txt(y, cx, to_w, at, "%s", t->headsign);
+        txt(y, cx, to_w, hot ? at : at_stn, "%s", t->headsign);
         cx += to_w;
         if (today) {
             int mins = (d->time - now_floor(a)) / 60;
@@ -435,8 +488,8 @@ static void draw_table(App *a, int y0, int h, int cols) {
         }
         const Trip *t = &g->trips[a->tcols[i]];
         int sel = i == a->tc_sel;
-        txt(y0 + 2, x, COLW, sel ? at_sel : dir_attr(t->direction), " %-6s", t->number);
-        txt(y0 + 3, x, COLW, sel ? at_sel : at_dim, " %-6s", short_type(g, t));
+        txt(y0 + 2, x, COLW, sel ? at_sel : at_num, " %-6s", t->number);
+        txt(y0 + 3, x, COLW, sel ? at_sel : at_typ, " %-6s", short_type(g, t));
         for (int k = 0; k < t->count; k++) {
             const StopTime *st = &g->times[t->first + k];
             tm[c * ns + st->station] = k == t->count - 1 ? st->arr : st->dep;
@@ -450,7 +503,7 @@ static void draw_table(App *a, int y0, int h, int cols) {
             continue;
         }
         int st = a->vis[i], rsel = i == a->sel;
-        txt(y, 1, nw, rsel ? A_BOLD : A_NORMAL, "%c%s", rsel ? '>' : ' ', g->stations[st].name);
+        txt(y, 1, nw, at_stn, "%c%s", rsel ? '>' : ' ', g->stations[st].name);
         for (int c = 0; c < vis; c++) {
             int x = 1 + nw + c * COLW, tcol = a->tc_left + c, v = tm[c * ns + st];
             int csel = tcol == a->tc_sel;
@@ -472,6 +525,76 @@ static void draw_table(App *a, int y0, int h, int cols) {
     free(tm);
     if (a->nvis == 0 || a->ntcols == 0)
         txt(y0 + 4, 1, iw, at_dim, " %s", "No trains on this date.");
+}
+
+static void fmt_countdown(int secs, char *buf, size_t n) {
+    if (secs <= 0) snprintf(buf, n, "departing");
+    else if (secs < 3600) snprintf(buf, n, "%dm %02ds", secs / 60, secs % 60);
+    else snprintf(buf, n, "%dh %02dm", secs / 3600, secs / 60 % 60);
+}
+
+/* The next trains from the saved origin to the saved destination. */
+static void draw_next(App *a, int y0, int h, int cols) {
+    const Gtfs *g = *a->gp;
+    char t1[16], t2[16], t3[16], t4[16];
+    int iw = cols - 2;
+    box_at(y0, 0, h, cols, "Next trains", A_NORMAL);
+    if (a->nfrom < 0 || a->nto < 0) {
+        txt(y0 + 1, 1, iw, A_NORMAL, " From: %s", a->nfrom >= 0 ? g->stations[a->nfrom].name : "(press o to choose)");
+        txt(y0 + 2, 1, iw, A_NORMAL, " To:   %s", a->nto >= 0 ? g->stations[a->nto].name : "(press d to choose)");
+        txt(y0 + 4, 1, iw, at_dim, " Your choices are saved for next time.");
+        return;
+    }
+    const char *fn = g->stations[a->nfrom].name, *tn = g->stations[a->nto].name;
+    txt(y0 + 1, 1, iw, A_NORMAL, "");
+    txt(y0 + 1, 2, iw - 1, at_stn, "%s", fn);
+    int fl = (int)strlen(fn);
+    txt(y0 + 1, 2 + fl, 5, A_NORMAL, "  >  ");
+    txt(y0 + 1, 7 + fl, iw - 6 - fl, at_stn, "%s", tn);
+    if (a->nfrom == a->nto) {
+        txt(y0 + 3, 1, iw, at_dim, " Origin and destination are the same station.");
+        return;
+    }
+    if (a->nnext == 0) txt(y0 + 3, 1, iw, at_dim, " No direct trains found.");
+    int now = time_now(), gap = h >= 12 ? 1 : 0;
+    for (int i = 0; i < a->nnext; i++) {
+        const Journey *j = &a->nxt[i];
+        const Trip *t = &g->trips[j->dep.trip];
+        int y = y0 + 2 + i * (3 + gap), off = i >= a->ntomorrow ? 86400 : 0, sel = i == a->nsel;
+        int secs = j->dep.time - now;
+        fmt_hm(j->dep.time - off, t1, sizeof t1);
+        fmt_hm(j->arr_time - off, t2, sizeof t2);
+        fmt_dur((j->arr_time - j->dep.time + 59) / 60, t3, sizeof t3);
+        fmt_countdown(secs, t4, sizeof t4);
+        const char *ty = short_type(g, t);
+        int x = 1, tl = (int)strlen(t->number), yl = (int)strlen(ty);
+        txt(y, 1, iw, A_NORMAL, "");
+        txt(y, x, 2, A_BOLD, "%c ", sel ? '>' : ' ');
+        x += 2;
+        txt(y, x, 6, A_NORMAL, "Train ");
+        x += 6;
+        txt(y, x, tl, at_num, "%s", t->number);
+        x += tl + 2;
+        txt(y, x, 2, dir_attr(t->direction), "%s", dir_name(t->direction));
+        x += 3;
+        txt(y, x, yl, at_typ, "%s", ty);
+        x += yl + 2;
+        txt(y, x, 3, at_dim, "to ");
+        x += 3;
+        txt(y, x, iw - x, A_NORMAL, "%s", t->headsign);
+        txt(y + 1, 1, iw, A_NORMAL, "");
+        txt(y + 1, 3, 7, A_NORMAL, "Leaves");
+        txt(y + 1, 10, 6, at_time, "%s", t1);
+        txt(y + 1, 17, 22, secs <= 300 ? at_warn : at_good, "%s%s", off ? "tomorrow, in " : "in ", t4);
+        txt(y + 2, 1, iw, A_NORMAL, "");
+        txt(y + 2, 3, 8, A_NORMAL, "Arrives");
+        txt(y + 2, 11, 6, at_time, "%s", t2);
+        int nl = (int)strlen(tn);
+        txt(y + 2, 18, 3, at_dim, "at ");
+        txt(y + 2, 21, nl, at_stn, "%s", tn);
+        txt(y + 2, 21 + nl, iw - 20 - nl, at_dim, " (%s trip)", t3);
+        txt(y + 1, 40, iw - 39, at_dim, "Delay: n/a (schedule only)");
+    }
 }
 
 static void draw_board(App *a, int y0, int h, int cols) {
@@ -521,21 +644,21 @@ static void draw_plan(App *a, int y0, int h, int cols) {
         fmt_hm(j->dep.time, t1, sizeof t1);
         fmt_hm(j->arr_time, t2, sizeof t2);
         fmt_dur((j->arr_time - j->dep.time) / 60, t3, sizeof t3);
-        txt(y, cx, 8, at, "%s", t1);
+        txt(y, cx, 8, sel ? at : at_time, "%s", t1);
         cx += 9;
-        txt(y, cx, 8, at, "%s", t2);
+        txt(y, cx, 8, sel ? at : at_time, "%s", t2);
         cx += 9;
         txt(y, cx, 6, at, "%s", t3);
         cx += 7;
-        txt(y, cx, 5, at, "%s", t->number);
+        txt(y, cx, 5, sel ? at : at_num, "%s", t->number);
         cx += 6;
         txt(y, cx, 2, sel ? at : dir_attr(t->direction), "%s", dir_name(t->direction));
         cx += 3;
         if (wide) {
-            txt(y, cx, 12, at, "%.*s", type_len(trip_type(g, t)), trip_type(g, t));
+            txt(y, cx, 12, sel ? at : at_typ, "%.*s", type_len(trip_type(g, t)), trip_type(g, t));
             cx += 13;
         }
-        if (to_w > 0) txt(y, cx, to_w, at, "%s", t->headsign);
+        if (to_w > 0) txt(y, cx, to_w, sel ? at : at_stn, "%s", t->headsign);
         cx += to_w > 0 ? to_w : 0;
         if (today) {
             int mins = (j->dep.time - a->ptime) / 60;
@@ -591,7 +714,8 @@ static void popup(int h, int w, const char *title, int *py, int *px) {
 
 static void draw_help(void) {
     static const char *lines[] = {
-        "1 / 2 / Tab     Departures board / Trip planner",
+        "1 2 3 / Tab     Next trains / Departures board / Trip planner",
+        "o d x           Next trains: origin / destination / swap (saved)",
         "j k  arrows     Move       PgUp PgDn  Page     g G  First/last",
         "h l             Board: previous / next train (list view: switch pane)",
         "v               Board: table / departures list view",
@@ -622,6 +746,7 @@ static void render(App *a) {
     draw_title(a, COLS);
     int h = LINES - 2;
     if (a->mode == M_BOARD) draw_board(a, 1, h, COLS);
+    else if (a->mode == M_NEXT) draw_next(a, 1, h, COLS);
     else if (a->mode == M_PLAN) draw_plan(a, 1, h, COLS);
     else draw_detail(a, 1, h, COLS);
     draw_status(a, LINES, COLS);
@@ -811,6 +936,7 @@ static void poll_reload(App *a) {
         build_vis(a);
         a->sel = a->st_top = 0;
         a->from = a->to = -1;
+        resolve_cfg(a);
         if (a->mode == M_DETAIL) a->mode = a->prev_mode;
         reset_lists(a);
     }
@@ -832,6 +958,9 @@ static int list_key(App *a, int ch) {
     if (a->mode == M_DETAIL) {
         sel = &a->d_top;
         n = (*a->gp)->trips[a->dtrip].count;
+    } else if (a->mode == M_NEXT) {
+        sel = &a->nsel;
+        n = a->nnext;
     } else if (board && a->focus == 0) {
         sel = &a->sel;
         n = a->nvis;
@@ -883,10 +1012,11 @@ static int handle_key(App *a, int ch) {
     switch (ch) {
     case 'q': case 'Q': return 1;
     case '?': a->help = 1; return 0;
-    case '1': a->mode = M_BOARD; return 0;
-    case '2': a->mode = M_PLAN; return 0;
+    case '1': a->mode = M_NEXT; return 0;
+    case '2': a->mode = M_BOARD; return 0;
+    case '3': a->mode = M_PLAN; return 0;
     case '\t':
-        a->mode = a->mode == M_PLAN ? M_BOARD : M_PLAN;
+        a->mode = a->mode == M_NEXT ? M_BOARD : a->mode == M_BOARD ? M_PLAN : M_NEXT;
         return 0;
     case '[': case ']': case 't':
         if (a->mode == M_PLAN) {
@@ -928,6 +1058,23 @@ static int handle_key(App *a, int ch) {
                 const Departure *d = &a->deps[a->dep_sel];
                 open_detail(a, d->trip, a->vis[a->sel], -1);
             }
+        }
+    } else if (a->mode == M_NEXT) {
+        if (ch == 'o' || ch == 'd') {
+            int s = pick_station(a, ch == 'o' ? "Origin" : "Destination", ch == 'o' ? a->nfrom : a->nto);
+            if (s >= 0) {
+                *(ch == 'o' ? &a->nfrom : &a->nto) = s;
+                save_cfg(a);
+            }
+            a->nsel = 0;
+        } else if (ch == 'x') {
+            int tmp = a->nfrom;
+            a->nfrom = a->nto;
+            a->nto = tmp;
+            a->nsel = 0;
+            save_cfg(a);
+        } else if (enter && a->nnext > 0) {
+            open_detail(a, a->nxt[a->nsel].dep.trip, a->nfrom, a->nto);
         }
     } else if (a->mode == M_PLAN) {
         if (ch == 'o' || ch == 'd') {
@@ -971,7 +1118,7 @@ int ui_run(Gtfs **g, const char *note, UiReloadFn reload, void *ctx) {
     a.gp = g;
     a.reload = reload;
     a.ctx = ctx;
-    a.mode = M_BOARD;
+    a.mode = M_NEXT;
     a.date = date_today();
     a.dirf = DIR_ANY;
     a.from = a.to = -1;
@@ -980,6 +1127,8 @@ int ui_run(Gtfs **g, const char *note, UiReloadFn reload, void *ctx) {
     a.deps = xrealloc(NULL, MAXLIST * sizeof *a.deps);
     a.jrs = xrealloc(NULL, MAXLIST * sizeof *a.jrs);
     build_vis(&a);
+    config_load(&a.cfg);
+    resolve_cfg(&a);
     if (note && *note) set_msg(&a, "%s", note);
 
     for (;;) {
